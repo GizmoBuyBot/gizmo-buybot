@@ -1,65 +1,60 @@
 import os
 import time
 import requests
-from telegram import Bot
 from dotenv import load_dotenv
+from telegram import Bot
+from flask import Flask
 
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-PAIR_ADDRESS = "apechain/0xc3105500CFf134b82e88a7A6809Af00a5Ee186F3"  # GIZMO token pair on ApeChain
+TOKEN_ADDRESS = "0xc3105500CFf134b82e88a7A6809Af00a5Ee186F3"
+DEXSCREENER_API = f"https://api.dexscreener.com/latest/dex/pairs/ethereum/{TOKEN_ADDRESS.lower()}"
 
+app = Flask(__name__)
 bot = Bot(token=BOT_TOKEN)
 
-def fetch_dex_data():
-    url = f"https://api.dexscreener.com/latest/dex/pairs/{PAIR_ADDRESS}"
+last_txn_hash = None
+
+@app.route("/")
+def home():
+    return "Gizmo BuyBot is online."
+
+def format_message(data):
+    price_usd = data.get("priceUsd", "?")
+    txns = data.get("txns", {}).get("m5", {})
+    buys = txns.get("buys", 0)
+    volume = txns.get("volume", 0)
+    return f"🚀 $GIZMO Buy Detected!\nPrice: ${price_usd}\nBuys (last 5m): {buys}\nVolume: ${volume}"
+
+def check_buys():
+    global last_txn_hash
     try:
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            return response.json().get("pair")
-        else:
-            print(f"⚠️ DexScreener response {response.status_code}")
-            return None
+        response = requests.get(DEXSCREENER_API)
+        if response.status_code != 200:
+            print("DexScreener error:", response.status_code)
+            return
+
+        data = response.json().get("pair", {})
+        latest_txn = data.get("lastTransactionHash")
+
+        if latest_txn and latest_txn != last_txn_hash:
+            last_txn_hash = latest_txn
+            message = format_message(data)
+            bot.send_message(chat_id=CHAT_ID, text=message)
+            print("✅ Sent Telegram buy alert.")
+
     except Exception as e:
-        print(f"❌ Error fetching Dex data: {e}")
-        return None
+        print("⚠️ Error in check_buys:", e)
 
-def format_alert(data):
-    price = float(data["priceUsd"])
-    tx_count = data["txCount"]["m5"]
-    volume = data["volume"]["h1"]
-    liquidity = data["liquidity"]["usd"]
-
-    return (
-        f"💥 *New $GIZMO Activity Detected!*\n"
-        f"🔹 Price: ${price:.6f}\n"
-        f"🔸 5-min TX Count: {tx_count}\n"
-        f"💧 Liquidity: ${liquidity:,}\n"
-        f"📈 Volume (1h): ${volume:,}\n\n"
-        f"[📊 Chart](https://dexscreener.com/apechain/0xc3105500cfF134b82e88a7A6809Af00a5Ee186F3)"
-    )
-
-def main():
-    print("🚀 GIZMO BuyBot is running with DexScreener...")
-    last_tx_count = None
-
+def main_loop():
+    print("🚀 Gizmo BuyBot started...")
     while True:
-        data = fetch_dex_data()
-        if data:
-            current_tx = data["txCount"]["m5"]
-            if last_tx_count is not None and current_tx > last_tx_count:
-                alert = format_alert(data)
-                try:
-                    bot.send_message(chat_id=CHAT_ID, text=alert, parse_mode="Markdown", disable_web_page_preview=False)
-                    print("✅ Alert sent.")
-                except Exception as e:
-                    print(f"❌ Telegram error: {e}")
-            last_tx_count = current_tx
-        else:
-            print("⚠️ No data found.")
-
-        time.sleep(15)
+        check_buys()
+        time.sleep(20)
 
 if __name__ == "__main__":
-    main()
+    from threading import Thread
+    Thread(target=main_loop).start()
+    app.run(host="0.0.0.0", port=10000)
