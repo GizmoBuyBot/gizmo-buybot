@@ -1,3 +1,11 @@
 requests
 web3
 python-telegram-bot==13.15
+APScheduler==3.6.3
+pytz>=2018.6
+cachetools==4.2.2
+certifi
+tornado==6.1
+six>=1.4.0
+tzlocal>=1.2
+flask
