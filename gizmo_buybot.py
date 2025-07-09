@@ -1,68 +1,74 @@
-import requests
-import json
-import time
 import os
+import time
+import requests
 import logging
-import pytz
-from apscheduler.schedulers.blocking import BlockingScheduler
-from telegram import Bot
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from flask import Flask
 
-# Configs from environment
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-API_URL = os.getenv("API_URL")
-CHECK_INTERVAL = 15
+# Telegram bot setup
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
 
-# Initialize bot and scheduler
-bot = Bot(token=TELEGRAM_TOKEN)
-scheduler = BlockingScheduler(timezone=pytz.UTC)
+# Contract info
+PAIR_ADDRESS = "0xC8A45b49Dcf4162e6017dEb01E51C10f8D1781e0"  # example
+CHAIN = "ethereum"  # or 'solana' or 'base' or 'bsc' etc.
 
-# Message cache to avoid reposting
-last_txn_hash = None
+# GeckoTerminal API URL
+GECKO_API = f"https://api.geckoterminal.com/api/v2/networks/{CHAIN}/pools/{PAIR_ADDRESS}"
 
-def fetch_buy():
+# Logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger()
+
+# Keepalive dummy Flask server
+app = Flask(__name__)
+@app.route("/")
+def home():
+    return "BuyBot is running."
+
+def get_latest_buy():
     try:
-        response = requests.get(API_URL)
-        data = response.json()
-
-        if not data or "data" not in data:
-            logging.warning("Invalid response from GeckoTerminal")
-            return
-
-        txn = data["data"]["attributes"]["last_trade"]
-
-        if txn["trade_type"] != "buy":
-            return
-
-        global last_txn_hash
-        if txn["transaction_hash"] == last_txn_hash:
-            return
-
-        last_txn_hash = txn["transaction_hash"]
-
-        wape_amount = round(float(txn["base_amount_formatted"]), 2)
-        usd_value = round(float(txn["quote_amount_formatted"]), 2)
-        token_amount = round(float(txn["token_amount_formatted"]), 2)
-
-        tx_hash = txn["transaction_hash"]
-        tx_url = f"https://explorer.apescan.dev/tx/{tx_hash}"
-
-        message = (
-            f"🟢 *Buy Alert!*\n"
-            f"{wape_amount} WAPE (${'{:.2f}'.format(usd_value)}) just bought\n\n"
-            f"🪙 *{token_amount} GIZMO*\n"
-            f"[View TX]({tx_url})"
-        )
-
-        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode="Markdown")
-
+        res = requests.get(GECKO_API)
+        if res.status_code != 200:
+            logger.warning("Non-200 response from GeckoTerminal: %s", res.status_code)
+            return None
+        data = res.json()
+        logger.info("GeckoTerminal Response: %s", data)
+        # Extract buy transaction from response (adjust as needed)
+        return data["data"]["attributes"]["recent_trades"][0]  # Might fail if format changed
     except Exception as e:
-        logging.error(f"Error: {e}")
+        logger.error("Error fetching from GeckoTerminal: %s", e)
+        return None
+
+def send_buy_alert(bot, tx):
+    try:
+        tx_hash = tx.get("tx_hash", "unknown")
+        buyer = tx.get("buyer_address", "unknown")
+        value = tx.get("amount_usd", "unknown")
+        message = f"💰 New Buy!\nBuyer: {buyer}\nUSD: ${value}\nTX: {tx_hash}"
+        bot.send_message(chat_id=CHAT_ID, text=message)
+    except Exception as e:
+        logger.error("Error sending alert: %s", e)
 
 def main():
-    scheduler.add_job(fetch_buy, "interval", seconds=CHECK_INTERVAL)
-    print("🚀 GIZMO BuyBot is running...")
-    scheduler.start()
+    bot = Bot(token=BOT_TOKEN)
+    logger.info("🚀 GIZMO BuyBot is running...")
+    last_tx_hash = None
+
+    while True:
+        tx = get_latest_buy()
+        if tx:
+            logger.info("Latest TX: %s", tx)
+            if tx["tx_hash"] != last_tx_hash:
+                send_buy_alert(bot, tx)
+                last_tx_hash = tx["tx_hash"]
+            else:
+                logger.info("No new buy.")
+        else:
+            logger.warning("❌ No transaction data fetched.")
+        time.sleep(15)
 
 if __name__ == "__main__":
+    import threading
+    threading.Thread(target=app.run, kwargs={"host": "0.0.0.0", "port": 10000}).start()
     main()
