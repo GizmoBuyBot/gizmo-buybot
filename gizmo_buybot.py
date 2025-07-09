@@ -1,74 +1,65 @@
 import os
 import time
 import requests
-import logging
 from telegram import Bot
-from flask import Flask
+from dotenv import load_dotenv
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger()
+load_dotenv()
 
-# Get Telegram credentials
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-PORT = int(os.getenv("PORT", 10000))
+PAIR_ADDRESS = "apechain/0xc3105500CFf134b82e88a7A6809Af00a5Ee186F3"  # GIZMO token pair on ApeChain
 
-if not BOT_TOKEN or not CHAT_ID:
-    raise ValueError("❌ BOT_TOKEN or CHAT_ID environment variables not set!")
+bot = Bot(token=BOT_TOKEN)
 
-# Flask dummy server
-app = Flask(__name__)
-
-@app.route("/")
-def home():
-    return "✅ Gizmo BuyBot is live"
-
-# Pool info
-PAIR_ADDRESS = "0xC8A45b49Dcf4162e6017dEb01E51C10f8D1781e0"
-CHAIN = "ethereum"
-GECKO_API = f"https://api.geckoterminal.com/api/v2/networks/{CHAIN}/pools/{PAIR_ADDRESS}"
-
-def get_latest_buy():
+def fetch_dex_data():
+    url = f"https://api.dexscreener.com/latest/dex/pairs/{PAIR_ADDRESS}"
     try:
-        res = requests.get(GECKO_API)
-        if res.status_code != 200:
-            logger.warning("Non-200 Gecko response: %s", res.status_code)
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            return response.json().get("pair")
+        else:
+            print(f"⚠️ DexScreener response {response.status_code}")
             return None
-        data = res.json()
-        logger.info("✅ GeckoTerminal response received.")
-        return data["data"]["attributes"]["recent_trades"][0]
     except Exception as e:
-        logger.error("Error from GeckoTerminal: %s", e)
+        print(f"❌ Error fetching Dex data: {e}")
         return None
 
-def send_buy_alert(bot, tx):
-    try:
-        tx_hash = tx.get("tx_hash", "unknown")
-        buyer = tx.get("buyer_address", "unknown")
-        value = tx.get("amount_usd", "unknown")
-        message = f"💰 New Buy!\nBuyer: {buyer}\nUSD: ${value}\nTX: {tx_hash}"
-        bot.send_message(chat_id=CHAT_ID, text=message)
-    except Exception as e:
-        logger.error("❌ Failed to send TG alert: %s", e)
+def format_alert(data):
+    price = float(data["priceUsd"])
+    tx_count = data["txCount"]["m5"]
+    volume = data["volume"]["h1"]
+    liquidity = data["liquidity"]["usd"]
+
+    return (
+        f"💥 *New $GIZMO Activity Detected!*\n"
+        f"🔹 Price: ${price:.6f}\n"
+        f"🔸 5-min TX Count: {tx_count}\n"
+        f"💧 Liquidity: ${liquidity:,}\n"
+        f"📈 Volume (1h): ${volume:,}\n\n"
+        f"[📊 Chart](https://dexscreener.com/apechain/0xc3105500cfF134b82e88a7A6809Af00a5Ee186F3)"
+    )
 
 def main():
-    bot = Bot(token=BOT_TOKEN)
-    logger.info("🚀 Gizmo BuyBot started...")
-    last_tx = None
+    print("🚀 GIZMO BuyBot is running with DexScreener...")
+    last_tx_count = None
+
     while True:
-        tx = get_latest_buy()
-        if tx:
-            tx_hash = tx.get("tx_hash")
-            if tx_hash != last_tx:
-                logger.info("New buy: %s", tx)
-                send_buy_alert(bot, tx)
-                last_tx = tx_hash
-            else:
-                logger.info("No new buy yet.")
+        data = fetch_dex_data()
+        if data:
+            current_tx = data["txCount"]["m5"]
+            if last_tx_count is not None and current_tx > last_tx_count:
+                alert = format_alert(data)
+                try:
+                    bot.send_message(chat_id=CHAT_ID, text=alert, parse_mode="Markdown", disable_web_page_preview=False)
+                    print("✅ Alert sent.")
+                except Exception as e:
+                    print(f"❌ Telegram error: {e}")
+            last_tx_count = current_tx
+        else:
+            print("⚠️ No data found.")
+
         time.sleep(15)
 
 if __name__ == "__main__":
-    import threading
-    threading.Thread(target=app.run, kwargs={"host": "0.0.0.0", "port": PORT}).start()
     main()
