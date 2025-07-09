@@ -1,75 +1,67 @@
-import os
-import time
 import requests
-from telegram import Bot, ParseMode
+import json
+import time
+import os
+import logging
+import pytz
 from apscheduler.schedulers.blocking import BlockingScheduler
+from telegram import Bot
 
-# Config
+# Configs from environment
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-API_URL = os.getenv("API_URL")  # Your external API source for buy transactions
-CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 10))  # Default to 10 seconds
+API_URL = os.getenv("API_URL")
+CHECK_INTERVAL = 15
 
+# Initialize bot and scheduler
 bot = Bot(token=TELEGRAM_TOKEN)
-scheduler = BlockingScheduler()
-last_tx_hash = None
+scheduler = BlockingScheduler(timezone=pytz.UTC)
 
-def fetch_transactions():
+# Message cache to avoid reposting
+last_txn_hash = None
+
+def fetch_buy():
     try:
-        response = requests.get(API_URL, timeout=10)
-        response.raise_for_status()
-        return response.json()
+        response = requests.get(API_URL)
+        data = response.json()
+
+        if not data or "data" not in data:
+            logging.warning("Invalid response from GeckoTerminal")
+            return
+
+        txn = data["data"]["attributes"]["last_trade"]
+
+        if txn["trade_type"] != "buy":
+            return
+
+        global last_txn_hash
+        if txn["transaction_hash"] == last_txn_hash:
+            return
+
+        last_txn_hash = txn["transaction_hash"]
+
+        wape_amount = round(float(txn["base_amount_formatted"]), 2)
+        usd_value = round(float(txn["quote_amount_formatted"]), 2)
+        token_amount = round(float(txn["token_amount_formatted"]), 2)
+
+        tx_hash = txn["transaction_hash"]
+        tx_url = f"https://explorer.apescan.dev/tx/{tx_hash}"
+
+        message = (
+            f"🟢 *Buy Alert!*\n"
+            f"{wape_amount} WAPE (${'{:.2f}'.format(usd_value)}) just bought\n\n"
+            f"🪙 *{token_amount} GIZMO*\n"
+            f"[View TX]({tx_url})"
+        )
+
+        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode="Markdown")
+
     except Exception as e:
-        print(f"Failed to fetch transactions: {e}")
-        return None
-
-def build_message(tx_data):
-    pair = tx_data.get("pair", "Unknown Pair")
-    txns = tx_data.get("txns", [])
-    if not txns:
-        return f"<b>{pair}</b>\nNo recent buys found."
-
-    txn = txns[0]
-    buyer = txn.get("buyer", "Unknown")
-    amount = txn.get("amount", "N/A")
-    token = txn.get("token", "GIZMO")
-    value = txn.get("value_usd", "?")
-    tx_hash = txn.get("tx", "")
-
-    return (
-        f"🚀 <b>Buy Alert!</b>\n\n"
-        f"<b>Token:</b> {token}\n"
-        f"<b>Buyer:</b> {buyer}\n"
-        f"<b>Amount:</b> {amount}\n"
-        f"<b>Value:</b> ${value}\n"
-        f"<b>TX:</b> <a href='https://apescan.xyz/tx/{tx_hash}'>View TX</a>"
-    )
-
-def send_buy_alert(bot, tx_data):
-    global last_tx_hash
-    txns = tx_data.get("txns", [])
-
-    if not txns:
-        print("No transactions found. Skipping alert.")
-        return
-
-    current_tx_hash = txns[0].get("tx")
-    if current_tx_hash == last_tx_hash:
-        return
-
-    last_tx_hash = current_tx_hash
-    message = build_message(tx_data)
-    bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-
-def job():
-    print("Checking for new transactions...")
-    tx_data = fetch_transactions()
-    if tx_data:
-        send_buy_alert(bot, tx_data)
+        logging.error(f"Error: {e}")
 
 def main():
+    scheduler.add_job(fetch_buy, "interval", seconds=CHECK_INTERVAL)
     print("🚀 GIZMO BuyBot is running...")
-    scheduler.add_job(job, "interval", seconds=CHECK_INTERVAL)
     scheduler.start()
 
 if __name__ == "__main__":
