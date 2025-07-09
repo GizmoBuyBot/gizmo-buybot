@@ -1,88 +1,76 @@
+import os
 import time
 import requests
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import TelegramError
+from telegram import Bot, ParseMode
+from apscheduler.schedulers.blocking import BlockingScheduler
 
-BOT_TOKEN = "8091393191:AAHrLWwaHgAIXBTNLBNDxad9gtKaYcOScLA"
-CHAT_ID = "-1002233988866"  # Replace with your actual group chat ID
-VIDEO_FILE_ID = "BAACAgEAAxkBAAMEaGyzUGywKUYSQPU0KMpiKwqkbgoAArwGAAKp5QlFpIxB-SExnjI2BA"
+# Config
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+API_URL = os.getenv("API_URL")  # Your external API source for buy transactions
+CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 10))  # Default to 10 seconds
 
-DEXSCREENER_API = "https://api.dexscreener.com/latest/dex/pairs/apechain/0x2b34F0Dd63Aab54563918a4C82e85f5f39EfA2f7"
-CHECK_INTERVAL = 10  # seconds
+bot = Bot(token=TELEGRAM_TOKEN)
+scheduler = BlockingScheduler()
 last_tx_hash = None
 
-def fetch_latest_buy():
+def fetch_transactions():
     try:
-        response = requests.get(DEXSCREENER_API)
-        data = response.json()
-        txns = data["pair"]["txns"]["m5"]
-        return data["pair"], txns
+        response = requests.get(API_URL, timeout=10)
+        response.raise_for_status()
+        return response.json()
     except Exception as e:
-        print("Error fetching buy:", e)
-        return None, None
+        print(f"Failed to fetch transactions: {e}")
+        return None
 
-def format_paws(amount_spent):
-    paws = "🐾" * int(float(amount_spent) / 5)
-    return paws[:25]  # cap at 25 paws
+def build_message(tx_data):
+    pair = tx_data.get("pair", "Unknown Pair")
+    txns = tx_data.get("txns", [])
+    if not txns:
+        return f"<b>{pair}</b>\nNo recent buys found."
+
+    txn = txns[0]
+    buyer = txn.get("buyer", "Unknown")
+    amount = txn.get("amount", "N/A")
+    token = txn.get("token", "GIZMO")
+    value = txn.get("value_usd", "?")
+    tx_hash = txn.get("tx", "")
+
+    return (
+        f"🚀 <b>Buy Alert!</b>\n\n"
+        f"<b>Token:</b> {token}\n"
+        f"<b>Buyer:</b> {buyer}\n"
+        f"<b>Amount:</b> {amount}\n"
+        f"<b>Value:</b> ${value}\n"
+        f"<b>TX:</b> <a href='https://apescan.xyz/tx/{tx_hash}'>View TX</a>"
+    )
 
 def send_buy_alert(bot, tx_data):
     global last_tx_hash
-    if tx_data["txns"] and tx_data["txns"][0]["tx"] == last_tx_hash:
-        return  # skip if no new tx
-    last_tx_hash = tx_data["txns"][0]["tx"]
+    txns = tx_data.get("txns", [])
 
-    info, _ = tx_data
-    price = info["priceUsd"]
-    liquidity = info["liquidity"]["usd"]
-    market_cap = info["fdv"]
+    if not txns:
+        print("No transactions found. Skipping alert.")
+        return
 
-    spent = 10.34  # placeholder or fetch real if available
-    amount = 381_588  # placeholder or fetch real if available
-    position = "🆕"
+    current_tx_hash = txns[0].get("tx")
+    if current_tx_hash == last_tx_hash:
+        return
 
-    paws = format_paws(spent)
+    last_tx_hash = current_tx_hash
+    message = build_message(tx_data)
+    bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
-    caption = (
-        f"*GIZMO BUY!*\n\n"
-        f"{paws}\n\n"
-        f"💸 Spent: {spent} $WAPE ($11.79)\n"
-        f"💰 Got: {amount:,} $GIZMO\n"
-        f"🔄 Buy Position: {position}\n"
-        f"✅ Dex: Camelot | 🔗Book Trending - ADS\n"
-        f"🏷️ Price: ${float(price):.8f}\n"
-        f"🏦 Liquidity: ${float(liquidity):,.2f}\n"
-        f"📊 Market Cap: ${float(market_cap):,.2f}\n\n"
-        f"[TX](https://apechain.calderaexplorer.xyz/) | "
-        f"[Chart](https://dexscreener.com/apechain/0x2b34F0Dd63Aab54563918a4C82e85f5f39EfA2f7) | "
-        f"[TG](https://t.me/apegizmo) | "
-        f"[X](https://x.com/apegizmo) | "
-        f"[Website](https://gizmoape.net)"
-    )
-
-    buttons = [[InlineKeyboardButton("YOUR AD HERE", url="https://t.me/ApechainADSBot")]]
-    markup = InlineKeyboardMarkup(buttons)
-
-    try:
-        bot.send_video(
-            chat_id=CHAT_ID,
-            video=VIDEO_FILE_ID,
-            caption=caption,
-            reply_markup=markup,
-            parse_mode="Markdown"
-        )
-        print("✅ Buy alert sent.")
-    except TelegramError as e:
-        print("Telegram error:", e)
+def job():
+    print("Checking for new transactions...")
+    tx_data = fetch_transactions()
+    if tx_data:
+        send_buy_alert(bot, tx_data)
 
 def main():
-    bot = Bot(token=BOT_TOKEN)
     print("🚀 GIZMO BuyBot is running...")
-
-    while True:
-        tx_data, txns = fetch_latest_buy()
-        if tx_data and txns:
-            send_buy_alert(bot, {"pair": tx_data, "txns": txns})
-        time.sleep(CHECK_INTERVAL)
+    scheduler.add_job(job, "interval", seconds=CHECK_INTERVAL)
+    scheduler.start()
 
 if __name__ == "__main__":
     main()
